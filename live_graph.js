@@ -20,12 +20,15 @@ export class LiveGraph {
     this.yMin = -10;
     this.yMax = 10;
     this.dataRate = 24.0;
-    this.lastDataTime = 0;
+    this.lastDataTime = Date.now();
     this.dataCount = 0;
     this.rawBuffer = '';
     this.expandOnly = true;
     this.splitChannels = [1, 2, 3, 4];
     this.currentValues = new Array(13).fill(0);
+    this.smoothingBuffer = [];
+    this.smoothingFactor = 0.8;
+    this.animationFrame = null;
     this.init();
   }
 
@@ -43,27 +46,49 @@ export class LiveGraph {
     // Update data rate every second
     setInterval(() => this.updateDataRate(), 1000);
     
+    // Start smooth animation loop
+    this.startAnimationLoop();
+    
     // Simulate data for demo
     this.simulateData();
   }
 
+  startAnimationLoop() {
+    const animate = () => {
+      this.draw();
+      this.animationFrame = requestAnimationFrame(animate);
+    };
+    animate();
+  }
+
   simulateData() {
     if (!this.paused && this.connected) {
-      // Generate realistic multi-channel data
+      // Generate realistic multi-channel data with smooth transitions
       const newData = [];
       const time = Date.now() / 1000;
       
       for (let i = 0; i < 13; i++) {
         let value;
         if (i < 4) {
-          // Main signals with more variation
-          value = 100 + 50 * Math.sin(time * 0.5 + i) + 20 * Math.sin(time * 2 + i * 0.5) + Math.random() * 10;
+          // Main signals with more variation and smooth curves
+          value = 100 + 50 * Math.sin(time * 0.5 + i) + 20 * Math.sin(time * 2 + i * 0.5) + 
+                  10 * Math.sin(time * 5 + i * 0.3) + (Math.random() - 0.5) * 5;
         } else {
           // Additional signals with different patterns
-          value = 80 + 30 * Math.cos(time * 0.3 + i) + 15 * Math.sin(time * 1.5 + i) + Math.random() * 8;
+          value = 80 + 30 * Math.cos(time * 0.3 + i) + 15 * Math.sin(time * 1.5 + i) + 
+                  8 * Math.cos(time * 3 + i * 0.7) + (Math.random() - 0.5) * 3;
         }
-        newData.push(value);
-        this.currentValues[i] = value;
+        
+        // Apply smoothing
+        if (this.smoothingBuffer[i] === undefined) {
+          this.smoothingBuffer[i] = value;
+        } else {
+          this.smoothingBuffer[i] = this.smoothingBuffer[i] * this.smoothingFactor + 
+                                   value * (1 - this.smoothingFactor);
+        }
+        
+        newData.push(this.smoothingBuffer[i]);
+        this.currentValues[i] = this.smoothingBuffer[i];
       }
       
       this.data.push(newData);
@@ -72,11 +97,10 @@ export class LiveGraph {
       if (this.data.length > this.maxSamples) {
         this.data.shift();
       }
-      
-      this.draw();
     }
     
-    setTimeout(() => this.simulateData(), 1000 / this.dataRate);
+    // Higher frequency for smoother updates
+    setTimeout(() => this.simulateData(), 1000 / (this.dataRate * 2));
   }
 
   renderSidebar() {
@@ -88,6 +112,7 @@ export class LiveGraph {
         <h3>Record Graph Data</h3>
         <button id="live-record-btn" class="sidebtn record-btn">${this.recording ? 'Stop Recording' : 'Start Recording'}</button>
         <button id="set-output-file" class="sidebtn">Set Output File</button>
+        <div class="keyboard-hint">Ctrl+R to toggle recording</div>
       </div>
       
       <div class="sidebar-section">
@@ -115,10 +140,11 @@ export class LiveGraph {
       <div class="sidebar-section">
         <h3>Data Format</h3>
         <div class="data-controls">
-          <button id="data-play" class="control-btn play">${this.paused ? '▶' : '⏸'}</button>
+          <button id="data-play" class="control-btn ${this.paused ? '' : 'play'}">${this.paused ? '▶' : '⏸'}</button>
           <button id="data-pause" class="control-btn pause">⏸</button>
           <button id="data-clear" class="control-btn">Clear</button>
         </div>
+        <div class="keyboard-hint">Space to pause/play, C to clear</div>
         
         <div class="split-section">
           <span>Split:</span>
@@ -136,7 +162,7 @@ export class LiveGraph {
         <h3>Graph 1</h3>
         <div class="signals-list">
           ${this.channelNames.map((name, i) => `
-            <div class="signal-item ${this.channelVisible[i] ? 'visible' : 'hidden'}">
+            <div class="signal-item ${this.channelVisible[i] ? 'visible' : 'hidden'}" data-channel="${i}">
               <div class="signal-indicator" style="background-color: ${this.channelColors[i]}">
                 <span class="signal-icon">${this.channelVisible[i] ? '▲' : '▼'}</span>
               </div>
@@ -147,9 +173,10 @@ export class LiveGraph {
         </div>
         
         <div class="signal-controls">
-          <button class="signal-control-btn">Hidden</button>
-          <button class="signal-control-btn">Empty</button>
+          <button id="toggle-hidden" class="signal-control-btn">Hidden</button>
+          <button id="toggle-empty" class="signal-control-btn">Empty</button>
         </div>
+        <div class="keyboard-hint">1-9 to toggle channels</div>
       </div>
       
       <div class="sidebar-section">
@@ -157,6 +184,7 @@ export class LiveGraph {
         <button id="live-connect-btn" class="sidebtn connect-btn">${this.connected ? 'Disconnect' : 'Connect Serial'}</button>
         <label>Baud Rate: <input id="live-baud" type="number" value="${this.baud}" min="300" max="250000"></label>
         <label>Max Samples: <input id="max-samples" type="number" value="${this.maxSamples}" min="100" max="10000"></label>
+        <div class="keyboard-hint">Ctrl+S to save data</div>
       </div>
       
       ${isAdmin ? `
@@ -188,6 +216,8 @@ export class LiveGraph {
     document.getElementById('data-play').onclick = () => this.togglePause();
     document.getElementById('data-pause').onclick = () => this.togglePause();
     document.getElementById('data-clear').onclick = () => this.clearGraph();
+    document.getElementById('toggle-hidden').onclick = () => this.toggleHiddenChannels();
+    document.getElementById('toggle-empty').onclick = () => this.toggleEmptyChannels();
     
     // Signal item click handlers
     document.querySelectorAll('.signal-item').forEach((item, index) => {
@@ -198,7 +228,30 @@ export class LiveGraph {
   toggleChannel(index) {
     this.channelVisible[index] = !this.channelVisible[index];
     this.renderSidebar();
-    this.draw();
+  }
+
+  toggleHiddenChannels() {
+    const hasHidden = this.channelVisible.some(v => !v);
+    if (hasHidden) {
+      // Show all hidden channels
+      this.channelVisible = this.channelVisible.map(() => true);
+    } else {
+      // Hide some channels
+      for (let i = 4; i < 13; i++) {
+        this.channelVisible[i] = false;
+      }
+    }
+    this.renderSidebar();
+  }
+
+  toggleEmptyChannels() {
+    // Toggle channels that have zero or very low values
+    for (let i = 0; i < 13; i++) {
+      if (Math.abs(this.currentValues[i]) < 1) {
+        this.channelVisible[i] = !this.channelVisible[i];
+      }
+    }
+    this.renderSidebar();
   }
 
   setOutputFile() {
@@ -223,7 +276,7 @@ export class LiveGraph {
     this.data = [];
     this.dataCount = 0;
     this.currentValues = new Array(13).fill(0);
-    this.draw();
+    this.smoothingBuffer = [];
     this.renderSidebar();
   }
 
@@ -234,11 +287,18 @@ export class LiveGraph {
 
   setGraphType(type) {
     this.graphType = type;
-    this.draw();
     this.renderSidebar();
   }
 
   updateDataRate() {
+    const now = Date.now();
+    const timeDiff = (now - this.lastDataTime) / 1000;
+    if (timeDiff > 0 && this.dataCount > 0) {
+      this.dataRate = this.dataCount / timeDiff;
+    }
+    this.lastDataTime = now;
+    this.dataCount = 0;
+    
     // Update UI elements
     const freqDisplay = document.querySelector('.frequency-display span');
     if (freqDisplay) {
@@ -272,6 +332,8 @@ export class LiveGraph {
   }
 
   async readLoop() {
+    let lineBuffer = '';
+    
     try {
       while (this.connected && this.reader) {
         const { value, done } = await this.reader.read();
@@ -279,16 +341,36 @@ export class LiveGraph {
         
         if (!this.paused) {
           const text = new TextDecoder().decode(value);
-          const lines = text.split('\n');
+          lineBuffer += text;
+          
+          // Process complete lines
+          const lines = lineBuffer.split('\n');
+          lineBuffer = lines.pop() || ''; // Keep incomplete line
+          
           for (let line of lines) {
             line = line.trim();
             if (line) {
-              let vals = line.split(',').map(v => parseFloat(v.trim()));
-              vals = vals.filter(v => !isNaN(v));
+              // Parse comma-separated values
+              let vals = line.split(',').map(v => {
+                const num = parseFloat(v.trim());
+                return isNaN(num) ? 0 : num;
+              });
               
               if (vals.length > 0) {
+                // Ensure we have exactly 13 channels
                 while (vals.length < 13) vals.push(0);
                 vals = vals.slice(0, 13);
+                
+                // Apply smoothing to incoming data
+                for (let i = 0; i < 13; i++) {
+                  if (this.smoothingBuffer[i] === undefined) {
+                    this.smoothingBuffer[i] = vals[i];
+                  } else {
+                    this.smoothingBuffer[i] = this.smoothingBuffer[i] * this.smoothingFactor + 
+                                           vals[i] * (1 - this.smoothingFactor);
+                  }
+                  vals[i] = this.smoothingBuffer[i];
+                }
                 
                 this.data.push(vals);
                 this.dataCount++;
@@ -297,9 +379,6 @@ export class LiveGraph {
                 if (this.data.length > this.maxSamples) {
                   this.data.shift();
                 }
-                
-                this.draw();
-                this.renderSidebar();
               }
             }
           }
@@ -397,7 +476,10 @@ export class LiveGraph {
       ctx.fillText(timeValue.toString(), x, h - 5);
     }
     
-    // Draw channels
+    // Draw channels with anti-aliasing
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    
     for (let ch = 0; ch < 13; ch++) {
       if (!this.channelVisible[ch]) continue;
       
@@ -469,5 +551,48 @@ export class LiveGraph {
     a.download = `live_graph_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+
+  // Keyboard shortcuts handler
+  handleKeyboard(e) {
+    if (e.ctrlKey) {
+      switch (e.key) {
+        case 'r':
+          this.toggleRecording();
+          e.preventDefault();
+          break;
+        case 's':
+          this.saveCSV();
+          e.preventDefault();
+          break;
+      }
+    } else {
+      switch (e.key) {
+        case ' ':
+          this.togglePause();
+          e.preventDefault();
+          break;
+        case 'c':
+        case 'C':
+          this.clearGraph();
+          e.preventDefault();
+          break;
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7':
+        case '8':
+        case '9':
+          const channelIndex = parseInt(e.key) - 1;
+          if (channelIndex < 13) {
+            this.toggleChannel(channelIndex);
+          }
+          e.preventDefault();
+          break;
+      }
+    }
   }
 }

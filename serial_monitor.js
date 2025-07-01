@@ -8,7 +8,9 @@ export class SerialMonitor {
     this.input = null;
     this.tags = [
       { text: 'SENT:', color: '#67d8ef' },
-      { text: '[info]', color: '#98c379' }
+      { text: '[info]', color: '#98c379' },
+      { text: 'ERROR:', color: '#d02662' },
+      { text: 'DEBUG:', color: '#e5c07b' }
     ];
     this.buffer = [];
     this.recording = false;
@@ -18,6 +20,7 @@ export class SerialMonitor {
     this.baud = 9600;
     this.connected = false;
     this.autoScroll = true;
+    this.dataBuffer = '';
     this.init();
   }
 
@@ -44,6 +47,8 @@ export class SerialMonitor {
     this.appendTerminal('104,106,109,109,114,118,122,130,136,143,149,141,');
     this.appendTerminal('86,81,79,81,75,71,68,67,66,65,72,81,');
     this.appendTerminal('91,88,86,86,83,80,77,76,72,59,72,73,');
+    this.appendTerminal('[info] Serial connection established');
+    this.appendTerminal('SENT: start_logging');
   }
 
   renderSidebar() {
@@ -56,12 +61,14 @@ export class SerialMonitor {
         <button id="serial-connect-btn" class="sidebtn connect-btn">${this.connected ? 'Disconnect' : 'Connect'}</button>
         <label>Port: COM4</label>
         <label>Baud: <input id="serial-baud" type="number" value="${this.baud}" min="300" max="250000"></label>
+        <div class="keyboard-hint">Ctrl+Shift+C to connect</div>
       </div>
       
       <div class="sidebar-section">
         <h3>Record Messages</h3>
         <button id="serial-record-btn" class="sidebtn record-btn">${this.recording ? 'Stop Recording' : 'Start Recording'}</button>
         <button id="set-output-file" class="sidebtn">Set Output File</button>
+        <div class="keyboard-hint">Ctrl+R to toggle recording</div>
       </div>
       
       <div class="sidebar-section">
@@ -72,12 +79,22 @@ export class SerialMonitor {
           Autoscroll: ${this.autoScroll ? 'On' : 'Off'}
         </label>
         <span style="font-size: 0.85em; color: var(--sidebar-heading);">Graph Data: Shown</span>
+        <div class="keyboard-hint">Ctrl+L to clear, Ctrl+A to toggle autoscroll</div>
       </div>
       
       <div class="sidebar-section">
         <h3>Colour Tags</h3>
         <button id="add-tag-btn" class="sidebtn">Add New Tag</button>
         <div id="tag-list"></div>
+        <div class="keyboard-hint">Ctrl+T to add tag</div>
+      </div>
+      
+      <div class="sidebar-section">
+        <h3>Quick Commands</h3>
+        <button id="cmd-start" class="sidebtn quick-cmd">Start Logging</button>
+        <button id="cmd-stop" class="sidebtn quick-cmd">Stop Logging</button>
+        <button id="cmd-reset" class="sidebtn quick-cmd">Reset Device</button>
+        <button id="cmd-status" class="sidebtn quick-cmd">Get Status</button>
       </div>
       
       ${isAdmin ? `
@@ -96,12 +113,32 @@ export class SerialMonitor {
     document.getElementById('serial-baud').onchange = e => { this.baud = Number(e.target.value); };
     document.getElementById('serial-record-btn').onclick = () => this.toggleRecording();
     document.getElementById('set-output-file').onclick = () => this.setOutputFile();
-    document.getElementById('serial-clear-btn').onclick = () => { this.terminal.textContent = ''; this.buffer = []; };
+    document.getElementById('serial-clear-btn').onclick = () => this.clearTerminal();
     document.getElementById('add-tag-btn').onclick = () => this.addTag();
     document.getElementById('auto-scroll').onchange = e => { this.autoScroll = e.target.checked; this.renderSidebar(); };
     
+    // Quick command handlers
+    document.getElementById('cmd-start').onclick = () => this.sendCommand('start_logging');
+    document.getElementById('cmd-stop').onclick = () => this.sendCommand('stop_logging');
+    document.getElementById('cmd-reset').onclick = () => this.sendCommand('reset');
+    document.getElementById('cmd-status').onclick = () => this.sendCommand('status');
+    
     this.renderTags();
     setStatusBar(`${this.connected?'Connected':'Disconnected'} | Port: COM4 | ${this.baud} baud | Serial Monitor`);
+  }
+
+  sendCommand(command) {
+    this.appendTerminal('SENT: ' + command);
+    if (this.connected && this.port && this.port.writable) {
+      const writer = this.port.writable.getWriter();
+      writer.write(new TextEncoder().encode(command + '\n'));
+      writer.releaseLock();
+    }
+  }
+
+  clearTerminal() {
+    this.terminal.textContent = '';
+    this.buffer = [];
   }
 
   renderTags() {
@@ -207,9 +244,10 @@ export class SerialMonitor {
         await this.port.open({ baudRate: this.baud });
         this.connected = true;
         this.reader = this.port.readable.getReader();
+        this.appendTerminal('[info] Serial connection established');
         this.readLoop();
       } catch (e) {
-        alert('Serial connection failed: ' + e);
+        this.appendTerminal('ERROR: Serial connection failed - ' + e.message);
       }
     } else {
       // Disconnect
@@ -218,6 +256,7 @@ export class SerialMonitor {
       this.connected = false;
       this.port = null;
       this.reader = null;
+      this.appendTerminal('[info] Serial connection closed');
     }
     this.renderSidebar();
   }
@@ -227,9 +266,24 @@ export class SerialMonitor {
       while (this.connected && this.reader) {
         const { value, done } = await this.reader.read();
         if (done) break;
-        this.appendTerminal(new TextDecoder().decode(value));
+        
+        const text = new TextDecoder().decode(value);
+        this.dataBuffer += text;
+        
+        // Process complete lines
+        const lines = this.dataBuffer.split('\n');
+        this.dataBuffer = lines.pop() || ''; // Keep incomplete line
+        
+        for (let line of lines) {
+          line = line.trim();
+          if (line) {
+            this.appendTerminal(line);
+          }
+        }
       }
-    } catch {}
+    } catch (e) {
+      this.appendTerminal('ERROR: Serial read error - ' + e.message);
+    }
     finally {
       this.connected = false;
       this.renderSidebar();
@@ -241,6 +295,7 @@ export class SerialMonitor {
       this.recording = false;
       if (this.fileHandle) this.fileHandle.close();
       this.fileHandle = null;
+      this.appendTerminal('[info] Recording stopped');
     } else {
       // Download all buffer as TXT
       const blob = new Blob([this.buffer.join('\n')], { type: 'text/plain' });
@@ -250,7 +305,46 @@ export class SerialMonitor {
       a.click();
       URL.revokeObjectURL(a.href);
       this.recording = true;
+      this.appendTerminal('[info] Recording started');
     }
     this.renderSidebar();
+  }
+
+  // Keyboard shortcuts handler
+  handleKeyboard(e) {
+    if (e.ctrlKey) {
+      switch (e.key) {
+        case 'r':
+          this.toggleRecording();
+          e.preventDefault();
+          break;
+        case 'l':
+          this.clearTerminal();
+          e.preventDefault();
+          break;
+        case 'a':
+          this.autoScroll = !this.autoScroll;
+          this.renderSidebar();
+          e.preventDefault();
+          break;
+        case 't':
+          this.addTag();
+          e.preventDefault();
+          break;
+      }
+      
+      if (e.shiftKey && e.key === 'C') {
+        this.toggleSerial();
+        e.preventDefault();
+      }
+    }
+    
+    // Focus input field when typing (if not in an input already)
+    if (!e.ctrlKey && !e.altKey && e.key.length === 1 && 
+        !document.activeElement.matches('input, textarea')) {
+      this.input.focus();
+      this.input.value += e.key;
+      e.preventDefault();
+    }
   }
 }
